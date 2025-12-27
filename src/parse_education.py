@@ -121,13 +121,15 @@ DEGREE_PATTERNS = {
     r'\bLicentiaat\b': ('Licentiaat', 'masters'),
 
     # Bachelor's - require periods or word boundary after
-    r'\bB\.A\.': ('B.A.', 'undergrad'),
-    r'\bBA\b(?!\s*\d)': ('B.A.', 'undergrad'),  # BA not followed by number
+    # Use negative lookbehind to avoid matching B.A. within M.B.A. or B.S. within M.B.S.
+    r'(?<![M\.])\bB\.A\.': ('B.A.', 'undergrad'),
+    r'(?<!M)\bBA\b(?!\s*\d)': ('B.A.', 'undergrad'),  # BA not followed by number
     r'\bBachelor\s+of\s+Arts': ('B.A.', 'undergrad'),
-    r'\bB\.S\.': ('B.S.', 'undergrad'),
-    r'\bBS\b(?!\s*\d)': ('B.S.', 'undergrad'),  # BS not followed by number
+    r'(?<![M\.])\bB\.S\.(?!B)': ('B.S.', 'undergrad'),  # B.S. but not B.S.B.
+    r'(?<!M)\bBS\b(?!\s*\d)': ('B.S.', 'undergrad'),  # BS not followed by number
     r'\bBachelor\s+of\s+Science': ('B.S.', 'undergrad'),
     r'\bB\.S\.B\.': ('B.S.B.', 'undergrad'),
+    r'\bBSB\b': ('B.S.B.', 'undergrad'),
     r'\bB\.Sc\.': ('B.Sc.', 'undergrad'),
     r'\bBSc\b': ('B.Sc.', 'undergrad'),
     r'\bB\.Tech\.': ('B.Tech.', 'undergrad'),
@@ -161,12 +163,14 @@ def extract_degree_info(line: str) -> List[dict]:
                 'field': field
             })
 
-    # Deduplicate by level (keep first match at each level)
-    seen_levels = set()
+    # Deduplicate by (degree_type, level) - allow multiple different degrees at same level
+    # e.g., "B.A., Mathematics, B.S., Economics" should keep both
+    seen = set()
     unique = []
     for d in degrees_found:
-        if d['level'] not in seen_levels:
-            seen_levels.add(d['level'])
+        key = (d['degree_type'], d['level'])
+        if key not in seen:
+            seen.add(key)
             unique.append(d)
 
     return unique
@@ -182,6 +186,17 @@ def extract_field(line: str, degree_type: str) -> str:
     # "Ph.D., Marketing"
     # "Ph.D., Economics, University of..."
     # "MBA in Strategy and Marketing"
+    # "Kandidaat in de Sociologie" (Dutch/Belgian)
+    # "Licentiaat in de Psychologie" (Dutch/Belgian)
+
+    # Pattern 0: Dutch/Belgian "in de [Field]" pattern
+    # Handles: "Kandidaat in de Sociologie", "Licentiaat in de Psychologie"
+    match = re.search(rf'{re.escape(degree_type)}\s+in\s+de\s+([A-Za-z]+)',
+                      line, re.IGNORECASE)
+    if match:
+        field = match.group(1).strip()
+        if len(field) > 2:
+            return field
 
     # Pattern 1: "Degree in/of Field"
     match = re.search(rf'{re.escape(degree_type)}\.?\s+(?:in|of)\s+([A-Za-z\s&]+?)(?:,|\s+\d{{4}}|\s+[A-Z]{{2,}}|\s*$)',
@@ -234,6 +249,17 @@ def extract_institution(line: str) -> Optional[str]:
     """Extract institution name from a line."""
     line = normalize_text(line)
 
+    # Handle compound institutions first (e.g., "Oklahoma City University – Moscow State University")
+    # These are joint programs between two universities
+    compound_match = re.search(
+        r'([A-Z][A-Za-z\s]+(?:University|Institute|College))\s*[–-]\s*([A-Z][A-Za-z\s]+(?:University|Institute|College)(?:\s*\([^)]+\))?)',
+        line
+    )
+    if compound_match:
+        inst1 = compound_match.group(1).strip()
+        inst2 = compound_match.group(2).strip()
+        return f"{inst1} / {inst2}"
+
     # Known institution patterns
     patterns = [
         r'(Texas\s+A\s*&?\s*M\s+University)',
@@ -249,9 +275,10 @@ def extract_institution(line: str) -> Optional[str]:
         r'(Northwestern\s+University)',
         r'(Syracuse\s+University)',
         r'(Emory\s+University)',
+        r'(Moscow\s+State\s+University(?:\s*\([^)]+\))?)',
         r'(Bo[gğ]azi[cç]i\s*University)',
         r'(University\s+of\s+[A-Z][A-Za-z\s\-]+?)(?:,|\s+\d{4}|;|\s*$)',
-        r'([A-Z][A-Za-z\.\s\-]+?\s+University)(?:,|\s+\d{4}|;|\s*$)',
+        r'([A-Z][A-Za-z\.\s\-]+?\s+University(?:\s*\([^)]+\))?)(?:,|\s+\d{4}|;|\s*$)',
         r'([A-Z][A-Za-z\s\-&]+\s+College)(?:,|\s+\d{4}|;|\s*$)',
     ]
 
@@ -303,8 +330,9 @@ def extract_year(line: str) -> Optional[str]:
     # Look for 4-digit years between 1950-2030
     matches = re.findall(r'\b(19[5-9]\d|20[0-3]\d)\b', line)
     if matches:
-        # Return the last year found (usually the graduation year)
-        return matches[-1]
+        # Return the FIRST year found (graduation year)
+        # Later years are often awards/honors dates like "Distinguished alumnus, 2017"
+        return matches[0]
     return None
 
 
