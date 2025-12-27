@@ -1,41 +1,64 @@
 """
 parse_education.py
 
-Simple, conservative rule-based parsing of education from CV text.
-Extracts undergraduate, master's, and PhD degree information.
-
-Design principles:
-1. Be conservative - only extract what we're confident about
-2. One degree type = one institution (no duplication)
-3. Extract from the same line when possible
-4. Leave blank and explain when uncertain
+Extracts detailed education information from CV text.
+For each degree: type, institution, school/college, field of study, year.
 """
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+from typing import Optional, List
+
+
+@dataclass
+class Degree:
+    """A single degree with full details."""
+    degree_type: str = ""      # e.g., "Ph.D.", "MBA", "B.S."
+    institution: str = ""       # e.g., "University of Pennsylvania"
+    school: str = ""            # e.g., "Wharton School" (within institution)
+    field: str = ""             # e.g., "Marketing", "Economics"
+    year: str = ""              # e.g., "2009", "1987"
+    level: str = ""             # "phd", "masters", "undergrad"
+    raw_text: str = ""          # Original text for verification
+
+    def __str__(self) -> str:
+        """Format degree for display."""
+        parts = [self.degree_type]
+        if self.field:
+            parts.append(self.field)
+        if self.school:
+            parts.append(self.school)
+        if self.institution:
+            parts.append(self.institution)
+        if self.year:
+            parts.append(f"({self.year})")
+        return ", ".join(parts)
 
 
 @dataclass
 class EducationRecord:
-    """Structured education data extracted from a CV."""
+    """All education data for a person."""
     name: str = ""
     cv_filename: str = ""
-    undergrad_school: str = ""
-    masters_school: str = ""
-    phd_school: str = ""
-    notes: list = field(default_factory=list)
+    degrees: List[Degree] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
 
-    def notes_str(self) -> str:
-        """Return notes as semicolon-separated string."""
-        return "; ".join(self.notes) if self.notes else ""
+    def get_degrees_by_level(self, level: str) -> List[Degree]:
+        """Get all degrees at a given level."""
+        return [d for d in self.degrees if d.level == level]
+
+    def format_degrees(self, level: str) -> str:
+        """Format all degrees at a level for CSV output."""
+        degs = self.get_degrees_by_level(level)
+        if not degs:
+            return ""
+        return " | ".join(str(d) for d in degs)
 
 
 # ============================================================================
 # SECTION DETECTION
 # ============================================================================
 
-# Headers that indicate start of education section
 EDUCATION_HEADERS = [
     r'^EDUCATION\s*[:.]?\s*$',
     r'^EDUCATIONAL\s+BACKGROUND\s*[:.]?\s*$',
@@ -43,11 +66,9 @@ EDUCATION_HEADERS = [
     r'^I\.\s*EARNED\s+DEGREES',
     r'^DEGREES\s*[:.]?\s*$',
     r'^ACADEMIC\s+BACKGROUND\s*[:.]?\s*$',
-    r'^ACADEMIC\s+QUALIFICATIONS?\s*[:.]?\s*$',
     r'^Employment\s+and\s+Education\s*[:.]?\s*$',
 ]
 
-# Headers that indicate end of education section
 END_HEADERS = [
     r'^EXPERIENCE',
     r'^EMPLOYMENT',
@@ -69,171 +90,152 @@ END_HEADERS = [
 
 
 # ============================================================================
-# DEGREE CLASSIFICATION
+# DEGREE PATTERNS
 # ============================================================================
 
-def classify_degree(line: str) -> Optional[str]:
-    """
-    Determine if a line contains a degree and what type.
+# Map degree abbreviations to (display_name, level)
+# Patterns use word boundaries and require periods or specific structure to avoid false matches
+DEGREE_PATTERNS = {
+    # Doctoral - most specific first
+    r'\bPh\.?\s*D\.': ('Ph.D.', 'phd'),
+    r'\bPhD\b': ('Ph.D.', 'phd'),
+    r'\bDoctor\s+of\s+Philosophy': ('Ph.D.', 'phd'),
+    r'\bD\.B\.A\.': ('D.B.A.', 'phd'),
+    r'\bDBA\b': ('D.B.A.', 'phd'),
+    r'\bDoctor\s+of\s+Business\s+Administration': ('D.B.A.', 'phd'),
 
-    Returns: 'phd', 'masters', 'undergrad', or None
+    # Master's - require periods or word boundary after
+    r'\bM\.B\.A\.': ('MBA', 'masters'),
+    r'\bMBA\b': ('MBA', 'masters'),
+    r'\bMaster\s+of\s+Business\s+Administration': ('MBA', 'masters'),
+    r'\bM\.S\.': ('M.S.', 'masters'),
+    r'\bMS\b(?!\s*\d)': ('M.S.', 'masters'),  # MS not followed by number
+    r'\bMaster\s+of\s+Science': ('M.S.', 'masters'),
+    r'\bM\.A\.': ('M.A.', 'masters'),
+    r'\bMA\b(?!\s*\d)': ('M.A.', 'masters'),  # MA not followed by number
+    r'\bMaster\s+of\s+Arts': ('M.A.', 'masters'),
+    r'\bM\.Sc\.': ('M.Sc.', 'masters'),
+    r'\bMSc\b': ('M.Sc.', 'masters'),
+    r'\bM\.Phil\.': ('M.Phil.', 'masters'),
+    r'\bMPhil\b': ('M.Phil.', 'masters'),
+    r'\bLicentiaat\b': ('Licentiaat', 'masters'),
+
+    # Bachelor's - require periods or word boundary after
+    r'\bB\.A\.': ('B.A.', 'undergrad'),
+    r'\bBA\b(?!\s*\d)': ('B.A.', 'undergrad'),  # BA not followed by number
+    r'\bBachelor\s+of\s+Arts': ('B.A.', 'undergrad'),
+    r'\bB\.S\.': ('B.S.', 'undergrad'),
+    r'\bBS\b(?!\s*\d)': ('B.S.', 'undergrad'),  # BS not followed by number
+    r'\bBachelor\s+of\s+Science': ('B.S.', 'undergrad'),
+    r'\bB\.S\.B\.': ('B.S.B.', 'undergrad'),
+    r'\bB\.Sc\.': ('B.Sc.', 'undergrad'),
+    r'\bBSc\b': ('B.Sc.', 'undergrad'),
+    r'\bB\.Tech\.': ('B.Tech.', 'undergrad'),
+    r'\bBTech\b': ('B.Tech.', 'undergrad'),
+    r'\bBachelor\s+of\s+Technology': ('B.Tech.', 'undergrad'),
+    r'\bB\.Eng\.': ('B.Eng.', 'undergrad'),
+    r'\bBEng\b': ('B.Eng.', 'undergrad'),
+    r'\bA\.B\.': ('A.B.', 'undergrad'),
+    r'\bAB\b(?=\s*[,\d])': ('A.B.', 'undergrad'),  # AB followed by comma or year
+    r'\bKandidaat\b': ('Kandidaat', 'undergrad'),
+}
+
+
+def extract_degree_info(line: str) -> List[dict]:
     """
+    Extract all degree information from a line.
+
+    Returns list of dicts with: degree_type, level, field
+    """
+    degrees_found = []
     line_upper = line.upper()
 
-    # PhD patterns (check first - highest priority)
-    phd_patterns = [
-        r'\bPH\.?\s*D\.?\b',  # Ph.D., PhD, Ph D
-        r'\bDOCTOR\s+OF\s+PHILOSOPHY\b',
-        r'\bDOCTORATE\b',
-        r'\bD\.?\s*B\.?\s*A\.?\b',  # D.B.A., DBA
-    ]
-    for p in phd_patterns:
-        if re.search(p, line_upper):
-            return 'phd'
+    # Check each degree pattern
+    for pattern, (degree_type, level) in DEGREE_PATTERNS.items():
+        if re.search(pattern, line, re.IGNORECASE):
+            # Found a degree - try to extract field
+            field = extract_field(line, degree_type)
+            degrees_found.append({
+                'degree_type': degree_type,
+                'level': level,
+                'field': field
+            })
 
-    # Master's patterns
-    masters_patterns = [
-        r'\bM\.?\s*B\.?\s*A\.?\b',  # M.B.A., MBA
-        r'\bM\.?\s*S\.?\b(?!\s*c)',  # M.S. but not MSc followed by other text
-        r'\bM\.?\s*A\.?\b',  # M.A., MA
-        r'\bM\.?\s*SC\.?\b',
-        r'\bM\.?\s*ENG\.?\b',
-        r'\bM\.?\s*PHIL\.?\b',
-        r'\bMASTER\s+OF\b',
-        r'\bMASTER\'?S\s+(?:DEGREE|IN)\b',
-        r'\bLICENTIAAT\b',  # Belgian equivalent of master's
-    ]
-    for p in masters_patterns:
-        if re.search(p, line_upper):
-            return 'masters'
+    # Deduplicate by level (keep first match at each level)
+    seen_levels = set()
+    unique = []
+    for d in degrees_found:
+        if d['level'] not in seen_levels:
+            seen_levels.add(d['level'])
+            unique.append(d)
 
-    # Undergrad patterns
-    undergrad_patterns = [
-        r'\bB\.?\s*A\.?\b',  # B.A., BA
-        r'\bB\.?\s*S\.?\b',  # B.S., BS
-        r'\bB\.?\s*SC\.?\b',
-        r'\bB\.?\s*S\.?\s*B\.?\b',  # B.S.B.
-        r'\bB\.?\s*TECH\.?\b',  # B.Tech
-        r'\bBACHELOR\s+OF\s+TECHNOLOGY\b',
-        r'\bBACHELOR\s+OF\s+SCIENCE\b',
-        r'\bBACHELOR\s+OF\s+ARTS\b',
-        r'\bBACHELOR\b',
-        r'\bKANDIDAAT\b',  # Belgian equivalent of bachelor's
-        r'\bA\.?\s*B\.?\b',  # Artium Baccalaureus (Harvard style)
-    ]
-    for p in undergrad_patterns:
-        if re.search(p, line_upper):
-            return 'undergrad'
-
-    return None
+    return unique
 
 
-def classify_all_degrees(line: str) -> List[str]:
-    """
-    Determine ALL degree types on a single line.
-    Handles cases like "B.A., M.A., Economics, Yale University"
+def extract_field(line: str, degree_type: str) -> str:
+    """Extract field of study from a degree line."""
+    # Normalize CamelCase first
+    line = normalize_text(line)
 
-    Returns: List of degree types found (e.g., ['undergrad', 'masters'])
-    """
-    line_upper = line.upper()
-    found = []
+    # Common patterns:
+    # "Ph.D. in Marketing"
+    # "Ph.D., Marketing"
+    # "Ph.D., Economics, University of..."
+    # "MBA in Strategy and Marketing"
 
-    # PhD patterns
-    phd_patterns = [
-        r'\bPH\.?\s*D\.?\b',
-        r'\bDOCTOR\s+OF\s+PHILOSOPHY\b',
-        r'\bDOCTORATE\b',
-        r'\bD\.?\s*B\.?\s*A\.?\b',
-    ]
-    for p in phd_patterns:
-        if re.search(p, line_upper):
-            found.append('phd')
-            break
+    # Pattern 1: "Degree in/of Field"
+    match = re.search(rf'{re.escape(degree_type)}\.?\s+(?:in|of)\s+([A-Za-z\s&]+?)(?:,|\s+\d{{4}}|\s+[A-Z]{{2,}}|\s*$)',
+                      line, re.IGNORECASE)
+    if match:
+        field = match.group(1).strip()
+        if len(field) > 2 and len(field) < 50:
+            return clean_field(field)
 
-    # Master's patterns
-    masters_patterns = [
-        r'\bM\.?\s*B\.?\s*A\.?\b',
-        r'\bM\.?\s*S\.?\b(?!\s*c)',
-        r'\bM\.?\s*A\.?\b',
-        r'\bM\.?\s*SC\.?\b',
-        r'\bM\.?\s*ENG\.?\b',
-        r'\bM\.?\s*PHIL\.?\b',
-        r'\bMASTER\s+OF\b',
-        r'\bLICENTIAAT\b',
-    ]
-    for p in masters_patterns:
-        if re.search(p, line_upper):
-            found.append('masters')
-            break
+    # Pattern 2: "Degree, Field, Institution"
+    match = re.search(rf'{re.escape(degree_type)}\.?\s*,\s*([A-Za-z\s&]+?)(?:,|\s+\d{{4}})',
+                      line, re.IGNORECASE)
+    if match:
+        field = match.group(1).strip()
+        # Make sure it's not an institution name
+        if not any(w in field.lower() for w in ['university', 'college', 'institute', 'school']):
+            if len(field) > 2 and len(field) < 50:
+                return clean_field(field)
 
-    # Undergrad patterns
-    undergrad_patterns = [
-        r'\bB\.?\s*A\.?\b',
-        r'\bB\.?\s*S\.?\b',
-        r'\bB\.?\s*SC\.?\b',
-        r'\bB\.?\s*S\.?\s*B\.?\b',
-        r'\bB\.?\s*TECH\.?\b',
-        r'\bBACHELOR\b',
-        r'\bKANDIDAAT\b',
-        r'\bA\.?\s*B\.?\b',
-    ]
-    for p in undergrad_patterns:
-        if re.search(p, line_upper):
-            found.append('undergrad')
-            break
-
-    return found
+    return ""
 
 
-def is_employment_line(line: str) -> bool:
-    """Check if a line describes employment rather than education."""
-    employment_indicators = [
-        r'\bProfessor\b',
-        r'\bAssistant\s+Professor\b',
-        r'\bAssociate\s+Professor\b',
-        r'\bLecturer\b',
-        r'\bInstructor\b',
-        r'\bDirector\b',
-        r'\bManager\b',
-        r'\bConsultant\b',
-        r'\bEngineer\b',
-        r'\b\d{4}\s*[-–]\s*(Present|present|\d{4})\b',  # Date ranges like "2001-Present"
-    ]
-    for p in employment_indicators:
-        if re.search(p, line, re.IGNORECASE):
-            # But make sure it's not also a degree line
-            if not classify_degree(line):
-                return True
-    return False
+def clean_field(field: str) -> str:
+    """Clean up extracted field name."""
+    # Remove common prefixes/suffixes
+    field = re.sub(r'^(in|of)\s+', '', field, flags=re.IGNORECASE)
+    field = re.sub(r'\s+(from|at)\s*$', '', field, flags=re.IGNORECASE)
+    field = field.strip(' ,.')
+    return field
 
 
 # ============================================================================
 # INSTITUTION EXTRACTION
 # ============================================================================
 
-def extract_institution(line: str) -> Optional[str]:
-    """
-    Extract institution name from a line.
-
-    Handles formats like:
-    - "Ph.D., Economics, University of Chicago, 1987"
-    - "University of Pennsylvania (Wharton School)"
-    - "Stanford University, June 2001"
-    - "StanfordUniversity" (no spaces)
-    """
-    # Handle diacritical marks that might be separated (Turkish, etc.)
-    # ˘ (breve) and ¸ (cedilla) sometimes appear after letters
+def normalize_text(line: str) -> str:
+    """Normalize text for extraction (handle special chars, CamelCase)."""
+    # Handle Turkish diacritics
     line = line.replace('g˘', 'ğ').replace('c¸', 'ç').replace('˘', '').replace('¸', '')
 
-    # Handle PDFs without spaces (CamelCase)
+    # Handle CamelCase (PDFs without spaces)
     if re.search(r'[a-z][A-Z]', line):
         line = re.sub(r'([a-z])([A-Z])', r'\1 \2', line)
-        # Also fix common patterns
-        line = re.sub(r'(\w)(University|Institute|College)', r'\1 \2', line)
+        line = re.sub(r'(\w)(University|Institute|College|School)', r'\1 \2', line)
 
-    # Known institution patterns (ordered by specificity)
+    return line
+
+
+def extract_institution(line: str) -> Optional[str]:
+    """Extract institution name from a line."""
+    line = normalize_text(line)
+
+    # Known institution patterns
     patterns = [
-        # Specific well-known schools first (full names)
         r'(Texas\s+A\s*&?\s*M\s+University)',
         r'(Massachusetts\s+Institute\s+of\s+Technology)',
         r'(Indian\s+Institute\s+of\s+Technology)',
@@ -247,23 +249,16 @@ def extract_institution(line: str) -> Optional[str]:
         r'(Northwestern\s+University)',
         r'(Syracuse\s+University)',
         r'(Emory\s+University)',
-        r'(Bo[gğ]azi[cç]i\s*University)',  # Boğaziçi University (Turkish)
-        r'(MIT)\b',
-        # "University of X" pattern
+        r'(Bo[gğ]azi[cç]i\s*University)',
         r'(University\s+of\s+[A-Z][A-Za-z\s\-]+?)(?:,|\s+\d{4}|;|\s*$)',
-        # "X University" pattern - capture words before University
         r'([A-Z][A-Za-z\.\s\-]+?\s+University)(?:,|\s+\d{4}|;|\s*$)',
-        # "X College" pattern
         r'([A-Z][A-Za-z\s\-&]+\s+College)(?:,|\s+\d{4}|;|\s*$)',
-        # Schools with "School" keyword (like Wharton School)
-        r'(The\s+Wharton\s+School)',
     ]
 
     for pattern in patterns:
         match = re.search(pattern, line, re.IGNORECASE)
         if match:
             institution = match.group(1).strip()
-            # Clean up
             institution = re.sub(r'\s+', ' ', institution)
             institution = institution.rstrip('.,;:')
             if len(institution) >= 3:
@@ -272,30 +267,45 @@ def extract_institution(line: str) -> Optional[str]:
     return None
 
 
-def extract_institution_with_school(line: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Extract both institution and specific school/college name.
-
-    Returns: (institution, school_name) e.g., ("University of Pennsylvania", "Wharton School")
-    """
-    institution = extract_institution(line)
-    school_name = None
-
-    # Look for school names in parentheses or after comma
-    school_patterns = [
-        r'\(([A-Z][A-Za-z\s]+School[^)]*)\)',  # (Wharton School)
-        r',\s*([A-Z][A-Za-z\s]+School\s+of\s+[A-Za-z]+)',  # , Kellogg School of Management
-        r'([A-Z][A-Za-z]+\s+School\s+of\s+(?:Business|Management|Law))',
-        r'([A-Z][A-Za-z]+\s+Business\s+School)',
+def extract_school(line: str) -> Optional[str]:
+    """Extract school/college name within an institution."""
+    patterns = [
+        r'(Wharton\s+School)',
+        r'(Kellogg\s+School\s+of\s+Management)',
+        r'(Booth\s+School\s+of\s+Business)',
+        r'(Graduate\s+School\s+of\s+Business)',
+        r'(Goizueta\s+Business\s+School)',
+        r'(Fuqua\s+School\s+of\s+Business)',
+        r'(Ross\s+School\s+of\s+Business)',
+        r'(Stern\s+School\s+of\s+Business)',
+        r'(Sloan\s+School)',
+        r'(Haas\s+School)',
+        r'(Johnson\s+(?:Graduate\s+)?School)',
+        r'(Darden\s+School)',
+        r'(Scheller\s+College)',
+        r'(Newhouse\s+School[^,]*)',
+        r'([A-Z][a-z]+\s+School\s+of\s+(?:Business|Management|Law|Medicine|Engineering))',
+        r'([A-Z][a-z]+\s+Business\s+School)',
     ]
 
-    for pattern in school_patterns:
-        match = re.search(pattern, line)
-        if match:
-            school_name = match.group(1).strip()
-            break
+    line = normalize_text(line)
 
-    return institution, school_name
+    for pattern in patterns:
+        match = re.search(pattern, line, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def extract_year(line: str) -> Optional[str]:
+    """Extract graduation year from a line."""
+    # Look for 4-digit years between 1950-2030
+    matches = re.findall(r'\b(19[5-9]\d|20[0-3]\d)\b', line)
+    if matches:
+        # Return the last year found (usually the graduation year)
+        return matches[-1]
+    return None
 
 
 # ============================================================================
@@ -303,10 +313,7 @@ def extract_institution_with_school(line: str) -> Tuple[Optional[str], Optional[
 # ============================================================================
 
 def extract_name(text: str) -> str:
-    """
-    Extract the person's name from the CV.
-    Usually at the very top.
-    """
+    """Extract person's name from CV."""
     lines = text.strip().split('\n')
 
     for line in lines[:10]:
@@ -314,50 +321,63 @@ def extract_name(text: str) -> str:
         if not line:
             continue
 
-        # Skip common non-name lines
+        # Skip non-name lines
         skip_patterns = [
-            r'@',  # Email
-            r'\d{3}[-.\s]?\d{3}',  # Phone
-            r'http|www\.',  # URL
-            r'^curriculum\s+vitae',
-            r'^cv\s*$',
-            r'^resume',
-            r'^address',
-            r'^phone',
-            r'^updated',
+            r'@', r'\d{3}[-.\s]?\d{3}', r'http|www\.',
+            r'^curriculum\s+vitae', r'^cv\s*$', r'^resume',
+            r'^address', r'^phone', r'^updated',
         ]
         if any(re.search(p, line, re.IGNORECASE) for p in skip_patterns):
             continue
 
-        # Name should be mostly letters, 2-5 words
+        # Name: mostly letters, 2-5 words
         words = line.split()
         if 2 <= len(words) <= 5:
             alpha_count = sum(1 for c in line if c.isalpha() or c.isspace() or c in '.-,')
             if alpha_count / max(len(line), 1) > 0.85:
-                # Clean up
                 name = re.sub(r',?\s*(Ph\.?D\.?|MBA|MD|JD).*$', '', line, flags=re.IGNORECASE)
-                name = name.strip()
-                if name:
-                    return name
+                return name.strip()
 
     return ""
 
 
 # ============================================================================
-# MAIN PARSING LOGIC
+# EMPLOYMENT DETECTION
+# ============================================================================
+
+def is_employment_line(line: str) -> bool:
+    """Check if line describes employment."""
+    patterns = [
+        r'\bProfessor\b',
+        r'\bAssistant\s+Professor\b',
+        r'\bAssociate\s+Professor\b',
+        r'\bLecturer\b',
+        r'\bDirector\b',
+        r'\bManager\b',
+        r'\bConsultant\b',
+        r'\b\d{4}\s*[-–]\s*(Present|present|\d{4})\b',
+    ]
+    for p in patterns:
+        if re.search(p, line, re.IGNORECASE):
+            # But not if it also has a degree
+            if not any(re.search(dp, line, re.IGNORECASE) for dp in DEGREE_PATTERNS.keys()):
+                return True
+    return False
+
+
+# ============================================================================
+# MAIN PARSING
 # ============================================================================
 
 def find_education_section(text: str) -> Optional[str]:
-    """Find and extract the education section from CV text."""
+    """Find and extract education section."""
     lines = text.split('\n')
 
-    # Find education header
-    # Skip table of contents entries (lines with "......" or page numbers)
     start_idx = None
     for i, line in enumerate(lines):
         line_stripped = line.strip()
 
-        # Skip TOC entries (have dots like "Education ........ 3")
+        # Skip TOC entries
         if '....' in line_stripped or re.search(r'\.\s*\d+\s*$', line_stripped):
             continue
 
@@ -371,7 +391,6 @@ def find_education_section(text: str) -> Optional[str]:
     if start_idx is None:
         return None
 
-    # Find end of section
     end_idx = len(lines)
     for i in range(start_idx + 1, len(lines)):
         line_stripped = lines[i].strip()
@@ -384,160 +403,82 @@ def find_education_section(text: str) -> Optional[str]:
         if end_idx != len(lines):
             break
 
-    # Extract section
     section_lines = lines[start_idx + 1:end_idx]
     return '\n'.join(section_lines).strip()
 
 
-def parse_degrees(edu_section: str) -> List[dict]:
-    """
-    Parse education section into individual degree entries.
-
-    Handles both single-line formats:
-        "Ph.D., Economics, University of Chicago, 1987"
-
-    And multi-line formats:
-        "The Wharton School, University of Pennsylvania"
-        "Doctor of Philosophy, Marketing"
-
-    Returns list of dicts: {'type': 'phd'/'masters'/'undergrad', 'institution': str, 'line': str}
-    """
-    if not edu_section:
-        return []
-
-    degrees = []
-    all_lines = [l.strip() for l in edu_section.split('\n') if l.strip()]
-
-    # First pass: Find all lines with degrees and try to extract institution
-    # Keep track of which lines have degrees for multi-line handling
-    degree_lines = []
-    for i, line in enumerate(all_lines):
-        if is_employment_line(line):
-            continue
-
-        # Check for multiple degrees on same line (e.g., "B.A., M.A., Yale")
-        degree_types = classify_all_degrees(line)
-        if degree_types:
-            institution = extract_institution(line)
-            for deg_type in degree_types:
-                degree_lines.append({
-                    'index': i,
-                    'type': deg_type,
-                    'institution': institution,
-                    'line': line
-                })
-
-    # Second pass: For degrees without institution, check ORIGINAL adjacent lines
-    for d in degree_lines:
-        if d['institution']:
-            continue  # Already has institution
-
-        idx = d['index']
-
-        # Check previous line in original text (not filtered)
-        if idx > 0:
-            prev_line = all_lines[idx - 1]
-            if not is_employment_line(prev_line):
-                inst = extract_institution(prev_line)
-                if inst:
-                    d['institution'] = inst
-                    d['line'] = f"{prev_line} / {d['line']}"
-                    continue
-
-        # Check next line in original text
-        if idx + 1 < len(all_lines):
-            next_line = all_lines[idx + 1]
-            if not is_employment_line(next_line):
-                inst = extract_institution(next_line)
-                if inst:
-                    d['institution'] = inst
-                    d['line'] = f"{d['line']} / {next_line}"
-
-    # Build final list
-    for d in degree_lines:
-        if d['institution']:
-            degrees.append({
-                'type': d['type'],
-                'institution': d['institution'],
-                'line': d['line']
-            })
-
-    return degrees
-
-
 def parse_education(text: str, filename: str = "") -> EducationRecord:
-    """
-    Main entry point: parse education from CV text.
-    """
+    """Main parsing function."""
     record = EducationRecord(cv_filename=filename)
 
     if not text:
         record.notes.append("No text provided")
         return record
 
-    # Extract name
     record.name = extract_name(text)
     if not record.name:
         record.notes.append("Could not extract name")
 
-    # Find education section
     edu_section = find_education_section(text)
     if not edu_section:
         record.notes.append("No education section found")
         return record
 
     # Parse degrees
-    degrees = parse_degrees(edu_section)
+    all_lines = [l.strip() for l in edu_section.split('\n') if l.strip()]
 
-    if not degrees:
-        record.notes.append("No degrees found in education section")
-        return record
+    # Track institutions for multi-line handling
+    pending_institution = None
+    pending_school = None
 
-    # Assign degrees to fields
-    # Track what we've assigned to avoid duplicates
-    phd_found = []
-    masters_found = []
-    undergrad_found = []
+    for i, line in enumerate(all_lines):
+        if is_employment_line(line):
+            continue
 
-    for d in degrees:
-        if d['type'] == 'phd':
-            phd_found.append(d['institution'])
-        elif d['type'] == 'masters':
-            masters_found.append(d['institution'])
-        elif d['type'] == 'undergrad':
-            undergrad_found.append(d['institution'])
+        # Check for degrees on this line
+        degree_infos = extract_degree_info(line)
 
-    # Assign PhD
-    if len(phd_found) == 1:
-        record.phd_school = phd_found[0]
-    elif len(phd_found) > 1:
-        # Multiple PhDs - use first, note others
-        record.phd_school = phd_found[0]
-        record.notes.append(f"Multiple PhDs listed: {', '.join(phd_found)}")
-    else:
-        record.notes.append("No PhD found")
+        if degree_infos:
+            # Found degree(s) - extract institution from this line or nearby
+            institution = extract_institution(line)
+            school = extract_school(line)
+            year = extract_year(line)
 
-    # Assign Master's
-    if len(masters_found) == 1:
-        record.masters_school = masters_found[0]
-    elif len(masters_found) > 1:
-        # Multiple master's - use first, note others
-        record.masters_school = masters_found[0]
-        record.notes.append(f"Multiple master's degrees: {', '.join(masters_found)}")
-    else:
-        record.notes.append("No master's degree found")
+            # If no institution on degree line, check previous line
+            if not institution and i > 0:
+                prev_line = all_lines[i - 1]
+                if not is_employment_line(prev_line):
+                    institution = extract_institution(prev_line)
+                    if not school:
+                        school = extract_school(prev_line)
 
-    # Assign Undergrad
-    if len(undergrad_found) == 1:
-        record.undergrad_school = undergrad_found[0]
-    elif len(undergrad_found) > 1:
-        # Multiple undergrad - use first, note others
-        record.undergrad_school = undergrad_found[0]
-        if len(set(undergrad_found)) > 1:
-            record.notes.append(f"Multiple undergrad degrees: {', '.join(undergrad_found)}")
+            # Use pending institution if still none
+            if not institution and pending_institution:
+                institution = pending_institution
+                school = school or pending_school
+
+            for deg_info in degree_infos:
+                degree = Degree(
+                    degree_type=deg_info['degree_type'],
+                    level=deg_info['level'],
+                    field=deg_info['field'],
+                    institution=institution or "",
+                    school=school or "",
+                    year=year or "",
+                    raw_text=line
+                )
+                record.degrees.append(degree)
+
+            pending_institution = None
+            pending_school = None
         else:
-            record.notes.append(f"Multiple undergrad degrees at same institution")
-    else:
-        record.notes.append("No undergrad degree found")
+            # No degree - check if this is an institution line
+            inst = extract_institution(line)
+            if inst:
+                pending_institution = inst
+                pending_school = extract_school(line)
+
+    if not record.degrees:
+        record.notes.append("No degrees found in education section")
 
     return record
