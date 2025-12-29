@@ -19,6 +19,7 @@ class Degree:
     field: str = ""             # e.g., "Marketing", "Economics"
     year: str = ""              # e.g., "2009", "1987"
     level: str = ""             # "phd", "masters", "undergrad"
+    dissertation: str = ""      # Dissertation title/topic (PhD only)
     raw_text: str = ""          # Original text for verification
 
     def __str__(self) -> str:
@@ -181,33 +182,43 @@ def extract_field(line: str, degree_type: str) -> str:
     # Normalize CamelCase first
     line = normalize_text(line)
 
+    # Create flexible pattern that matches both "B.A." and "BA" formats
+    # Remove periods and create pattern that matches with or without them
+    degree_base = degree_type.replace('.', '')  # "B.A." -> "BA"
+    # Build pattern: B\.?A\.? to match "BA", "B.A.", "B.A", etc.
+    degree_pattern = r'\.?\s*'.join(degree_base)  # "BA" -> "B\.?\s*A"
+    degree_pattern = r'\b' + degree_pattern + r'\.?'
+
     # Common patterns:
     # "Ph.D. in Marketing"
     # "Ph.D., Marketing"
     # "Ph.D., Economics, University of..."
     # "MBA in Strategy and Marketing"
+    # "BA, Political Science and Economics, University of..."
     # "Kandidaat in de Sociologie" (Dutch/Belgian)
     # "Licentiaat in de Psychologie" (Dutch/Belgian)
 
     # Pattern 0: Dutch/Belgian "in de [Field]" pattern
     # Handles: "Kandidaat in de Sociologie", "Licentiaat in de Psychologie"
-    match = re.search(rf'{re.escape(degree_type)}\s+in\s+de\s+([A-Za-z]+)',
+    match = re.search(rf'{degree_pattern}\s+in\s+de\s+([A-Za-z]+)',
                       line, re.IGNORECASE)
     if match:
         field = match.group(1).strip()
         if len(field) > 2:
             return field
 
-    # Pattern 1: "Degree in/of Field"
-    match = re.search(rf'{re.escape(degree_type)}\.?\s+(?:in|of)\s+([A-Za-z\s&]+?)(?:,|\s+\d{{4}}|\s+[A-Z]{{2,}}|\s*$)',
+    # Pattern 1: "Degree in/of Field" - include "and" in field names
+    # Handles: "MBA in Strategy and Marketing", "Ph.D. in Economics"
+    # Note: Don't include comma in field chars to avoid capturing institution
+    match = re.search(rf'{degree_pattern}\s+(?:in|of)\s+([A-Za-z][A-Za-z\s&]+?)(?:\s*,|\s+\d{{4}}|\s+[A-Z][a-z]+\s+University|\s+[A-Z][a-z]+\s+School|\s*$)',
                       line, re.IGNORECASE)
     if match:
-        field = match.group(1).strip()
-        if len(field) > 2 and len(field) < 50:
+        field = match.group(1).strip().rstrip(',')
+        if len(field) > 2 and len(field) < 60:
             return clean_field(field)
 
-    # Pattern 2: "Degree, Field, Institution"
-    match = re.search(rf'{re.escape(degree_type)}\.?\s*,\s*([A-Za-z\s&]+?)(?:,|\s+\d{{4}})',
+    # Pattern 2: "Degree, Field, Institution" or "Degree, Field, Year"
+    match = re.search(rf'{degree_pattern}\s*,\s*([A-Za-z\s&]+?)(?:,|\s+\d{{4}})',
                       line, re.IGNORECASE)
     if match:
         field = match.group(1).strip()
@@ -216,7 +227,83 @@ def extract_field(line: str, degree_type: str) -> str:
             if len(field) > 2 and len(field) < 50:
                 return clean_field(field)
 
+    # Pattern 3: "Degree Field, School/Institution" (space after degree, no comma before field)
+    # Handles: "Ph.D. Management and Organizations, Kellogg School"
+    match = re.search(rf'{degree_pattern}\s+([A-Za-z][A-Za-z\s&]+?)(?:,|\s+\d{{4}})',
+                      line, re.IGNORECASE)
+    if match:
+        field = match.group(1).strip()
+        # Make sure it's not an institution name or school name
+        if not any(w in field.lower() for w in ['university', 'college', 'institute', 'school', 'summa', 'magna', 'cum laude', 'honors']):
+            if len(field) > 2 and len(field) < 50:
+                return clean_field(field)
+
+    # Pattern 4: Multiple degrees sharing a field "B.A., M.A., Economics"
+    # Look for field after the degree in a multi-degree line
+    match = re.search(rf'{degree_pattern}\s*,\s*(?:M\.?A\.?|B\.?A\.?|M\.?S\.?|B\.?S\.?)\s*,\s*([A-Za-z\s&]+?)(?:,|\s+\d{{4}})',
+                      line, re.IGNORECASE)
+    if match:
+        field = match.group(1).strip()
+        if not any(w in field.lower() for w in ['university', 'college', 'institute', 'school']):
+            if len(field) > 2 and len(field) < 50:
+                return clean_field(field)
+
+    # Pattern 5: Full degree name with field "Doctor of Philosophy, Marketing"
+    # or "Bachelor of Technology, Mechanical Engineering"
+    full_degree_patterns = [
+        (r'Doctor\s+of\s+Philosophy\s*,\s*([A-Za-z\s&]+?)(?:\s*$|,|\d{4})', 'phd'),
+        (r'Master\s+of\s+(?:Science|Arts|Business)\s*,\s*([A-Za-z\s&]+?)(?:\s*$|,|\d{4})', 'masters'),
+        (r'Bachelor\s+of\s+(?:Science|Arts|Technology|Engineering)\s*,\s*([A-Za-z\s&]+?)(?:\s*$|,|\d{4})', 'undergrad'),
+    ]
+    for pattern, _ in full_degree_patterns:
+        match = re.search(pattern, line, re.IGNORECASE)
+        if match:
+            field = match.group(1).strip()
+            if not any(w in field.lower() for w in ['university', 'college', 'institute', 'school']):
+                if len(field) > 2 and len(field) < 50:
+                    return clean_field(field)
+
     return ""
+
+
+def extract_field_from_context(lines: List[str], degree_line_idx: int, degree_type: str) -> Optional[str]:
+    """
+    Extract field from nearby lines when not on the degree line itself.
+
+    Handles patterns like:
+    - "AcademicArea: Operations, Information & Technology" (on separate line)
+    - "Concentration: Experimental Psychology"
+    - "Major: Economics"
+    """
+    # Search within a few lines after the degree entry
+    search_range = min(degree_line_idx + 4, len(lines))
+
+    for i in range(degree_line_idx + 1, search_range):
+        line = normalize_text(lines[i].strip())
+
+        # Skip bullet points and empty-ish lines
+        if line in ['•', '-', ''] or len(line) < 5:
+            continue
+
+        # Pattern: "AcademicArea:" or "Academic Area:"
+        match = re.search(r'Academic\s*Area[:\s]+([A-Za-z,\s&]+?)(?:\s*$|•)', line, re.IGNORECASE)
+        if match:
+            field = match.group(1).strip().rstrip(',.')
+            # Clean up spacing (e.g., "Operations,Information" -> "Operations, Information")
+            field = re.sub(r',(?!\s)', ', ', field)
+            field = re.sub(r'&(?!\s)', ' & ', field)
+            if len(field) > 2:
+                return field
+
+        # Pattern: "Concentration:" or "Major:" or "Specialization:"
+        match = re.search(r'(?:Concentration|Major|Specialization|Field)[:\s]+([A-Za-z\s&]+?)(?:\s*$|,|\d{4})',
+                         line, re.IGNORECASE)
+        if match:
+            field = match.group(1).strip()
+            if len(field) > 2 and len(field) < 50:
+                return field
+
+    return None
 
 
 def clean_field(field: str) -> str:
@@ -237,10 +324,24 @@ def normalize_text(line: str) -> str:
     # Handle Turkish diacritics
     line = line.replace('g˘', 'ğ').replace('c¸', 'ç').replace('˘', '').replace('¸', '')
 
+    # Handle common lowercase connector words BEFORE CamelCase normalization
+    # e.g., "PricingwithDemand" -> "PricingWithDemand" -> "Pricing With Demand"
+    # This capitalizes the connector word so CamelCase detection will add space
+    connector_words = ['with', 'under', 'from', 'into', 'over', 'about']
+    for word in connector_words:
+        # Match: lowercase letter + connector + uppercase letter
+        pattern = rf'([a-z])({word})([A-Z])'
+        # Replace with capitalized connector to trigger CamelCase spacing
+        line = re.sub(pattern, lambda m: m.group(1) + m.group(2).capitalize() + m.group(3), line)
+
     # Handle CamelCase (PDFs without spaces)
     if re.search(r'[a-z][A-Z]', line):
         line = re.sub(r'([a-z])([A-Z])', r'\1 \2', line)
         line = re.sub(r'(\w)(University|Institute|College|School)', r'\1 \2', line)
+
+    # Lowercase connector words that should not be capitalized in titles
+    for word in connector_words:
+        line = re.sub(rf'\b{word.capitalize()}\b', word, line)
 
     return line
 
@@ -327,12 +428,68 @@ def extract_school(line: str) -> Optional[str]:
 
 def extract_year(line: str) -> Optional[str]:
     """Extract graduation year from a line."""
+    # Check for date range pattern first: "August 2008 - June 2012" or "2008-2012"
+    # In date ranges, the END year is the graduation year
+    range_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\s*[-–]\s*(?:\w+\s+)?(19[5-9]\d|20[0-3]\d)\b', line)
+    if range_match:
+        return range_match.group(2)  # Return the END year
+
     # Look for 4-digit years between 1950-2030
     matches = re.findall(r'\b(19[5-9]\d|20[0-3]\d)\b', line)
     if matches:
-        # Return the FIRST year found (graduation year)
-        # Later years are often awards/honors dates like "Distinguished alumnus, 2017"
-        return matches[0]
+        # Check if there's a pattern like "Distinguished alumnus, 2017" after the degree year
+        # In that case, return the first year
+        if len(matches) > 1 and re.search(r'alumnus|award|honor', line, re.IGNORECASE):
+            return matches[0]
+        # Otherwise return the last year (usually graduation year for single dates)
+        return matches[-1]
+    return None
+
+
+def extract_dissertation(lines: List[str], phd_line_idx: int) -> Optional[str]:
+    """
+    Extract dissertation title/topic for a PhD degree.
+
+    Looks for explicit dissertation mentions in the education section.
+    Only returns if explicitly stated - never guesses.
+
+    Common patterns:
+    - "Dissertation: [title]"
+    - "Thesis: [title]"
+    - "Dissertation title: [title]"
+    - "Topic: [topic]"
+    - Lines in quotes following PhD entry
+    """
+    # Search within a few lines after the PhD entry
+    search_range = min(phd_line_idx + 5, len(lines))
+
+    for i in range(phd_line_idx, search_range):
+        line = normalize_text(lines[i].strip())
+
+        # Pattern 1: "Dissertation:" or "Thesis:" prefix
+        match = re.search(r'(?:Dissertation|Thesis)\s*(?:title)?[:\s]+["\u201c]?(.+?)["\u201d]?\s*$',
+                         line, re.IGNORECASE)
+        if match:
+            title = match.group(1).strip().strip('""\u201c\u201d')
+            if len(title) > 10:  # Reasonable title length
+                return title
+
+        # Pattern 2: "Topic:" prefix
+        match = re.search(r'Topic[:\s]+["\u201c]?(.+?)["\u201d]?\s*$', line, re.IGNORECASE)
+        if match:
+            title = match.group(1).strip().strip('""\u201c\u201d')
+            if len(title) > 10:
+                return title
+
+        # Pattern 3: Quoted text on a line by itself (likely dissertation title)
+        # Only if it follows the PhD line closely
+        if i > phd_line_idx and i <= phd_line_idx + 2:
+            match = re.match(r'^["\u201c](.+)["\u201d]$', line)
+            if match:
+                title = match.group(1).strip()
+                if len(title) > 15:  # Dissertation titles are usually longer
+                    return title
+
     return None
 
 
@@ -458,6 +615,7 @@ def parse_education(text: str, filename: str = "") -> EducationRecord:
     # Track institutions for multi-line handling
     pending_institution = None
     pending_school = None
+    pending_year = None
 
     for i, line in enumerate(all_lines):
         if is_employment_line(line):
@@ -471,6 +629,15 @@ def parse_education(text: str, filename: str = "") -> EducationRecord:
             institution = extract_institution(line)
             school = extract_school(line)
             year = extract_year(line)
+
+            # If no year on degree line, check previous line
+            if not year and i > 0:
+                prev_line = all_lines[i - 1]
+                year = extract_year(prev_line)
+
+            # Use pending year if still none
+            if not year and pending_year:
+                year = pending_year
 
             # If no institution on degree line, check previous line
             if not institution and i > 0:
@@ -486,25 +653,38 @@ def parse_education(text: str, filename: str = "") -> EducationRecord:
                 school = school or pending_school
 
             for deg_info in degree_infos:
+                # Extract dissertation for PhD degrees only
+                dissertation = None
+                if deg_info['level'] == 'phd':
+                    dissertation = extract_dissertation(all_lines, i)
+
+                # If no field found on degree line, check nearby context lines
+                field = deg_info['field']
+                if not field:
+                    field = extract_field_from_context(all_lines, i, deg_info['degree_type']) or ""
+
                 degree = Degree(
                     degree_type=deg_info['degree_type'],
                     level=deg_info['level'],
-                    field=deg_info['field'],
+                    field=field,
                     institution=institution or "",
                     school=school or "",
                     year=year or "",
+                    dissertation=dissertation or "",
                     raw_text=line
                 )
                 record.degrees.append(degree)
 
             pending_institution = None
             pending_school = None
+            pending_year = None
         else:
-            # No degree - check if this is an institution line
+            # No degree - check if this is an institution line (with year)
             inst = extract_institution(line)
             if inst:
                 pending_institution = inst
                 pending_school = extract_school(line)
+                pending_year = extract_year(line)
 
     if not record.degrees:
         record.notes.append("No degrees found in education section")

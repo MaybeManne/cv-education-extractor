@@ -51,6 +51,10 @@ def format_degree(degree) -> str:
     if degree.year:
         parts.append(f"({degree.year})")
 
+    # Dissertation (PhD only) - add on new line for readability
+    if degree.dissertation:
+        parts.append(f'[Dissertation: "{degree.dissertation}"]')
+
     return ", ".join(parts) if parts else ""
 
 
