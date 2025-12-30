@@ -1,4 +1,4 @@
-## CV Education Extractor ✅ (Local, Rule-based)
+## CV Education Extractor ✅ 
 
 This repo takes a folder of **academic CV PDFs** and outputs a single CSV with each person’s **education**:
 - **Undergrad / Master’s / PhD**
@@ -23,7 +23,7 @@ It runs **100% locally** (no APIs, no ML calls), so it’s deterministic and eas
 
 ---
 
-## How it works (coding + logic)
+## How it works 
 
 ### 1) PDF → clean text (`extract_text.py`)
 - Uses `pdfplumber` to read each PDF page and call `page.extract_text()`.
@@ -48,7 +48,7 @@ Why: universities show up in employment (e.g., “Professor at University of X�
 
 ---
 
-### 3) Degree-first parsing (anchor on degrees, not schools)
+### 3) Degree-first parsing 
 Inside the education block, the parser loops line-by-line and looks for explicit degree tokens using `DEGREE_PATTERNS`:
 - PhD/DBA → `phd`
 - MBA/MS/MA/MPhil/Licentiaat → `masters`
