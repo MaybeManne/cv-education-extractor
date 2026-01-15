@@ -2,6 +2,21 @@
 utils.py
 
 Utility functions for the CV education extraction pipeline.
+
+OUTPUT SCHEMA (per Blake's requirements):
+- Each row = one CV
+- Columns are fully normalized, one variable per column
+- Multiple degrees at same level use numbered columns (undergrad_1_*, undergrad_2_*)
+- No dissertations or professional certifications
+
+Column layout:
+  person_name, cv_filename,
+  undergrad_1_degree, undergrad_1_major, undergrad_1_school, undergrad_1_year,
+  undergrad_2_degree, undergrad_2_major, undergrad_2_school, undergrad_2_year,
+  masters_1_degree, masters_1_major, masters_1_school, masters_1_year,
+  masters_2_degree, masters_2_major, masters_2_school, masters_2_year,
+  phd_degree, phd_major, phd_school, phd_year,
+  notes
 """
 
 import csv
@@ -10,14 +25,14 @@ from typing import List
 
 
 def ensure_directory(path: str | Path) -> Path:
-    """Ensure a directory exists."""
+    """Ensure a directory exists, creating it if necessary."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def get_pdf_files(directory: str | Path) -> List[Path]:
-    """Get all PDF files in a directory, sorted."""
+    """Get all PDF files in a directory, sorted alphabetically."""
     directory = Path(directory)
     if not directory.exists():
         print(f"[WARN] Directory does not exist: {directory}")
@@ -27,93 +42,72 @@ def get_pdf_files(directory: str | Path) -> List[Path]:
     return pdf_files
 
 
-def format_degree(degree) -> str:
-    """Format a single degree for CSV output."""
-    parts = []
+# ============================================================================
+# CSV OUTPUT - Normalized schema with numbered columns
+# ============================================================================
 
-    # Degree type is always first
-    if degree.degree_type:
-        parts.append(degree.degree_type)
+# Define the exact column order for the output CSV
+# This is the authoritative schema definition
+CSV_COLUMNS = [
+    # Identification
+    'person_name',
+    'cv_filename',
 
-    # Field of study
-    if degree.field:
-        parts.append(degree.field)
+    # Undergrad degrees (up to 2)
+    'undergrad_1_degree',
+    'undergrad_1_major',
+    'undergrad_1_school',
+    'undergrad_1_year',
+    'undergrad_2_degree',
+    'undergrad_2_major',
+    'undergrad_2_school',
+    'undergrad_2_year',
 
-    # School within institution (if different from institution)
-    if degree.school:
-        parts.append(degree.school)
+    # Master's degrees (up to 2)
+    'masters_1_degree',
+    'masters_1_major',
+    'masters_1_school',
+    'masters_1_year',
+    'masters_2_degree',
+    'masters_2_major',
+    'masters_2_school',
+    'masters_2_year',
 
-    # Institution
-    if degree.institution:
-        parts.append(degree.institution)
+    # PhD (typically just one)
+    'phd_degree',
+    'phd_major',
+    'phd_school',
+    'phd_year',
 
-    # Year
-    if degree.year:
-        parts.append(f"({degree.year})")
-
-    # Dissertation (PhD only) - add on new line for readability
-    if degree.dissertation:
-        parts.append(f'[Dissertation: "{degree.dissertation}"]')
-
-    return ", ".join(parts) if parts else ""
+    # Notes/warnings
+    'notes',
+]
 
 
 def write_csv(records: list, output_path: str | Path) -> bool:
     """
-    Write education records to CSV with detailed degree information.
+    Write education records to CSV with normalized columns.
 
-    Columns:
-    - name: Person's name
-    - cv_filename: Source PDF filename
-    - phd: Full PhD details (degree, field, school, institution, year)
-    - masters: Full master's details (may have multiple, separated by |)
-    - undergrad: Full undergrad details (may have multiple, separated by |)
-    - notes: Any extraction notes
+    Each level (undergrad, masters) supports up to 2 degrees with numbered columns.
+    PhD typically has just one set of columns.
+
+    All fields are quoted to handle commas and special characters in values.
     """
     output_path = Path(output_path)
     ensure_directory(output_path.parent)
 
-    fieldnames = [
-        'name',
-        'cv_filename',
-        'phd',
-        'masters',
-        'undergrad',
-        'notes'
-    ]
-
     try:
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+            writer = csv.DictWriter(
+                f,
+                fieldnames=CSV_COLUMNS,
+                quoting=csv.QUOTE_ALL,
+                extrasaction='ignore'  # Silently ignore extra keys
+            )
             writer.writeheader()
 
             for record in records:
-                # Format degrees by level
-                phd_degrees = record.get_degrees_by_level('phd')
-                masters_degrees = record.get_degrees_by_level('masters')
-                undergrad_degrees = record.get_degrees_by_level('undergrad')
-
-                phd_str = " | ".join(format_degree(d) for d in phd_degrees) if phd_degrees else ""
-                masters_str = " | ".join(format_degree(d) for d in masters_degrees) if masters_degrees else ""
-                undergrad_str = " | ".join(format_degree(d) for d in undergrad_degrees) if undergrad_degrees else ""
-
-                # Add notes for missing degrees
-                notes = record.notes.copy() if hasattr(record, 'notes') else []
-                if not phd_degrees:
-                    notes.append("No PhD found")
-                if not masters_degrees:
-                    notes.append("No master's degree found")
-                if not undergrad_degrees:
-                    notes.append("No undergrad degree found")
-
-                row = {
-                    'name': record.name,
-                    'cv_filename': record.cv_filename,
-                    'phd': phd_str,
-                    'masters': masters_str,
-                    'undergrad': undergrad_str,
-                    'notes': "; ".join(notes) if notes else ""
-                }
+                row = build_csv_row(record)
                 writer.writerow(row)
 
         print(f"[INFO] CSV written to: {output_path}")
@@ -121,22 +115,90 @@ def write_csv(records: list, output_path: str | Path) -> bool:
 
     except Exception as e:
         print(f"[ERROR] Failed to write CSV: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
+def build_csv_row(record) -> dict:
+    """
+    Build a single CSV row from an EducationRecord.
+
+    This function handles:
+    - Separating degrees by level
+    - Numbering multiple degrees at the same level
+    - Leaving unused columns blank
+    - Collecting notes about the extraction
+    """
+    row = {col: '' for col in CSV_COLUMNS}  # Start with all blank
+
+    # Identification
+    row['person_name'] = record.name or ''
+    row['cv_filename'] = record.cv_filename or ''
+
+    # Get degrees by level
+    undergrad_degrees = record.get_degrees_by_level('undergrad')
+    masters_degrees = record.get_degrees_by_level('masters')
+    phd_degrees = record.get_degrees_by_level('phd')
+
+    # Fill undergrad columns (up to 2)
+    for i, degree in enumerate(undergrad_degrees[:2], start=1):
+        row[f'undergrad_{i}_degree'] = degree.degree_type
+        row[f'undergrad_{i}_major'] = degree.field
+        row[f'undergrad_{i}_school'] = degree.institution
+        row[f'undergrad_{i}_year'] = degree.year
+
+    # Fill masters columns (up to 2)
+    for i, degree in enumerate(masters_degrees[:2], start=1):
+        row[f'masters_{i}_degree'] = degree.degree_type
+        row[f'masters_{i}_major'] = degree.field
+        row[f'masters_{i}_school'] = degree.institution
+        row[f'masters_{i}_year'] = degree.year
+
+    # Fill PhD columns (just one set, take the first if multiple)
+    if phd_degrees:
+        phd = phd_degrees[0]
+        row['phd_degree'] = phd.degree_type
+        row['phd_major'] = phd.field
+        row['phd_school'] = phd.institution
+        row['phd_year'] = phd.year
+
+    # Build notes
+    notes = list(record.notes) if hasattr(record, 'notes') else []
+
+    # Note if more degrees were found than we have columns for
+    if len(undergrad_degrees) > 2:
+        notes.append(f"{len(undergrad_degrees)} undergrad degrees found, only first 2 shown")
+    if len(masters_degrees) > 2:
+        notes.append(f"{len(masters_degrees)} masters degrees found, only first 2 shown")
+    if len(phd_degrees) > 1:
+        notes.append(f"{len(phd_degrees)} PhD degrees found, only first shown")
+
+    row['notes'] = '; '.join(notes) if notes else ''
+
+    return row
+
+
+# ============================================================================
+# SUMMARY AND LOGGING
+# ============================================================================
+
 def print_summary(records: list) -> None:
-    """Print extraction summary."""
+    """Print extraction summary statistics."""
     total = len(records)
     if total == 0:
         print("\n[SUMMARY] No records processed")
         return
 
+    # Calculate statistics
     has_name = sum(1 for r in records if r.name)
     has_phd = sum(1 for r in records if r.get_degrees_by_level('phd'))
     has_masters = sum(1 for r in records if r.get_degrees_by_level('masters'))
     has_undergrad = sum(1 for r in records if r.get_degrees_by_level('undergrad'))
     has_any = sum(1 for r in records if r.degrees)
+    no_education = sum(1 for r in records if not r.degrees)
 
+    # Print summary table
     print("\n" + "=" * 60)
     print("EXTRACTION SUMMARY")
     print("=" * 60)
@@ -146,44 +208,71 @@ def print_summary(records: list) -> None:
     print(f"Master's found:           {has_masters}/{total} ({100*has_masters/total:.1f}%)")
     print(f"Undergrad found:          {has_undergrad}/{total} ({100*has_undergrad/total:.1f}%)")
     print(f"At least one degree:      {has_any}/{total} ({100*has_any/total:.1f}%)")
+    print("-" * 60)
+    print(f"NO EDUCATION FOUND:       {no_education}/{total} ({100*no_education/total:.1f}%)")
     print("=" * 60)
 
-    # Show CVs needing review
-    needs_review = [r for r in records if not r.degrees]
-    if needs_review:
-        print("\n[ATTENTION] CVs with no degrees extracted:")
-        for r in needs_review:
+    # List CVs with no education (limited to first 20)
+    if no_education > 0:
+        needs_review = [r for r in records if not r.degrees]
+        print(f"\n[ATTENTION] {no_education} CV(s) with no degrees extracted:")
+        for r in needs_review[:20]:
             print(f"  - {r.cv_filename}")
+        if len(needs_review) > 20:
+            print(f"  ... and {len(needs_review) - 20} more")
+
+    # Count multiple degrees at same level
+    multi_undergrad = sum(1 for r in records if len(r.get_degrees_by_level('undergrad')) > 1)
+    multi_masters = sum(1 for r in records if len(r.get_degrees_by_level('masters')) > 1)
+    multi_phd = sum(1 for r in records if len(r.get_degrees_by_level('phd')) > 1)
+
+    if multi_undergrad or multi_masters or multi_phd:
+        print(f"\n[INFO] Multiple degrees at same level:")
+        if multi_undergrad:
+            print(f"  - Multiple undergrad: {multi_undergrad}")
+        if multi_masters:
+            print(f"  - Multiple masters: {multi_masters}")
+        if multi_phd:
+            print(f"  - Multiple PhD: {multi_phd}")
 
 
 def log_progress(current: int, total: int, filename: str) -> None:
-    """Log processing progress."""
+    """Log processing progress with percentage."""
     pct = 100 * current / total if total > 0 else 0
     print(f"[{current}/{total}] ({pct:.0f}%) Processing: {filename}")
 
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
 
 def validate_record(record) -> List[str]:
     """
     Validate an education record and return any warnings.
 
-    Returns list of warning messages.
+    Checks for anomalies that might indicate extraction issues:
+    - Same institution across multiple degree levels
+    - Unusual patterns that might be false positives
     """
     warnings = []
 
     # Check for same institution appearing for multiple degree levels
+    # This isn't necessarily wrong (people do get multiple degrees from same school)
+    # but it's worth flagging for review
     institutions_by_level = {}
     for degree in record.degrees:
         if degree.institution:
+            inst_lower = degree.institution.lower()
             if degree.level not in institutions_by_level:
                 institutions_by_level[degree.level] = set()
-            institutions_by_level[degree.level].add(degree.institution.lower())
+            institutions_by_level[degree.level].add(inst_lower)
 
-    # Check if any institution appears across multiple levels
+    # Find institutions that appear in multiple levels
     all_institutions = []
     for level, insts in institutions_by_level.items():
         all_institutions.extend(insts)
 
     if len(all_institutions) != len(set(all_institutions)):
-        warnings.append("Same institution appears for multiple degrees")
+        warnings.append("Same institution appears for multiple degree levels")
 
     return warnings
